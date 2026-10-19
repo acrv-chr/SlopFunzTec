@@ -10,7 +10,7 @@ st.set_page_config(
 )
 
 st.title("💶 Calcolo e Ripartizione Premio Produttività (Incentivi Tecnici)")
-st.caption("Distribuzione del fondo incentivi con auto-bilanciamento per riga e quota pro-capite")
+st.caption("Distribuzione del fondo incentivi con blocco celle e auto-bilanciamento per riga")
 
 # --- DEFINIZIONE STRUTTURA ---
 RUOLI = [
@@ -31,7 +31,7 @@ FASI = [
     "Collaudo"
 ]
 
-# Matrice percentuale iniziale
+# Matrice percentuale iniziale (somma totale = 100.0%)
 DEFAULT_PCT = [
     [1.0,  0.0,  3.0,  1.0,  0.0],   # Tot: 5.0%
     [5.0,  0.0,  5.0,  2.5,  0.0],   # Tot: 12.5%
@@ -39,38 +39,47 @@ DEFAULT_PCT = [
     [5.0,  0.0,  5.0,  2.5,  0.0],   # Tot: 12.5%
     [0.0, 12.5,  0.0,  0.0, 10.0],   # Tot: 22.5%
     [5.0,  7.5,  3.25, 1.75, 5.0],   # Tot: 22.5%
-    [2.5,  0.0,  5.0,  2.5,  2.5],   # Tot: 12.5% -> Somma totale: 100.0%
+    [2.5,  0.0,  5.0,  2.5,  2.5],   # Tot: 12.5%
 ]
 
-# Inizializzazione dello stato della matrice in session_state
+# Inizializzazione dello stato in session_state
 if "matrix_pct" not in st.session_state:
     st.session_state.matrix_pct = [row.copy() for row in DEFAULT_PCT]
 
-# --- CALLBACK PER AUTO-BILANCIAMENTO RIGA ---
+if "locked_cells" not in st.session_state:
+    # Matrice booleana di celle bloccate (False = sbloccata)
+    st.session_state.locked_cells = [[False for _ in RUOLI] for _ in FASI]
+
+# --- CALLBACK PER AUTO-BILANCIAMENTO CON BLOCCO ---
 def rebalance_row(row_idx, changed_col_idx):
     """
-    Ribilancia equamente gli altri elementi della riga quando uno slider viene modificato,
-    mantenendo costante il totale di riga originario.
+    Ribilancia il delta solo tra le celle non bloccate della stessa riga.
     """
-    new_val = st.session_state[f"slider_{row_idx}_{changed_col_idx}"]
+    slider_key = f"slider_{row_idx}_{changed_col_idx}"
+    new_val = st.session_state[slider_key]
     old_row = st.session_state.matrix_pct[row_idx]
-    target_row_sum = sum(old_row)
+    target_row_sum = sum(DEFAULT_PCT[row_idx])
     
-    # Se il nuovo valore supera il totale consentito per la riga, lo limitiamo
-    if new_val > target_row_sum:
-        new_val = target_row_sum
-        st.session_state[f"slider_{row_idx}_{changed_col_idx}"] = new_val
+    # Identifica le colonne modificabili (esclusa quella corrente e quelle bloccate)
+    unlocked_cols = [
+        c for c in range(len(RUOLI)) 
+        if c != changed_col_idx and not st.session_state.locked_cells[row_idx][c]
+    ]
+    
+    # Se non ci sono altre colonne sbloccate su cui distribuire, annulla il movimento
+    if not unlocked_cols:
+        st.session_state[slider_key] = old_row[changed_col_idx]
+        st.toast(f"Tutte le altre celle della riga sono bloccate! Sblocca almeno un'altra cella.", icon="🔒")
+        return
 
     delta = new_val - old_row[changed_col_idx]
-    other_indices = [c for c in range(len(RUOLI)) if c != changed_col_idx]
-    
     new_row = list(old_row)
     new_row[changed_col_idx] = new_val
     
-    # Ripartizione iterativa del delta residuo tra gli altri slider con vincolo [0, target_row_sum]
     remaining_delta = delta
-    available_indices = list(other_indices)
+    available_indices = list(unlocked_cols)
     
+    # Algoritmo di distribuzione del delta residuo
     while abs(remaining_delta) > 1e-6 and available_indices:
         split = remaining_delta / len(available_indices)
         next_available = []
@@ -90,7 +99,11 @@ def rebalance_row(row_idx, changed_col_idx):
             break
         available_indices = next_available
 
-    # Salva i nuovi valori nello stato
+    # Se non è stato possibile assorbire l'intero delta (es. limiti raggiunti a 0%)
+    if abs(remaining_delta) > 1e-4:
+        new_row[changed_col_idx] -= remaining_delta
+
+    # Aggiorna session_state
     for c in range(len(RUOLI)):
         st.session_state.matrix_pct[row_idx][c] = round(new_row[c], 4)
         st.session_state[f"slider_{row_idx}_{c}"] = round(new_row[c], 4)
@@ -107,7 +120,6 @@ with st.sidebar:
         format="%.2f"
     )
     
-    # Nuovo parametro richiesto: numero dipendenti della struttura
     num_altri_collaboratori = st.number_input(
         "N. dipendenti struttura (Altri Collaboratori)",
         min_value=1,
@@ -122,11 +134,14 @@ with st.sidebar:
     pct_personale = st.slider("Quota ripartibile al personale (%)", 0.0, 100.0, 80.0, 1.0) / 100.0
     pct_innovazione = 1.0 - pct_personale
 
-    if st.button("Ripristina percentuali predefinite"):
+    st.markdown("---")
+    if st.button("🔄 Ripristina valori e sblocca tutto"):
         st.session_state.matrix_pct = [row.copy() for row in DEFAULT_PCT]
+        st.session_state.locked_cells = [[False for _ in RUOLI] for _ in FASI]
         for r in range(len(FASI)):
             for c in range(len(RUOLI)):
                 st.session_state[f"slider_{r}_{c}"] = float(DEFAULT_PCT[r][c])
+                st.session_state[f"lock_{r}_{c}"] = False
         st.rerun()
 
 # --- CALCOLI FONDAMENTALI ---
@@ -143,37 +158,51 @@ col_m4.metric(f"Quota Fondo Ente ({pct_innovazione*100:.0f}%)", f"€ {quota_ent
 
 st.markdown("---")
 
-# --- REGOLAZIONE SLIDER CON AUTO-BILANCIAMENTO ---
-st.subheader("🎛️ Regolazione Percentuali (Auto-bilanciamento per Riga)")
-with st.expander("Apri per modificare le quote percentuali delle singole celle", expanded=True):
-    st.caption("ℹ️ Modificando il valore di una cella, gli altri ruoli della stessa riga si adegueranno automaticamente per mantenere costante il totale della fase.")
+# --- REGOLAZIONE SLIDER CON BLOCCO ---
+st.subheader("🎛️ Regolazione Percentuali con Blocco Celle (🔒)")
+with st.expander("Apri per modificare e bloccare le percentuali", expanded=True):
+    st.caption("ℹ️ Spunta **🔒 Blocca** per fissare il valore di una cella: non verrà alterata se modifichi gli altri ruoli della riga.")
     
     for i, fase in enumerate(FASI):
         row_target = sum(DEFAULT_PCT[i])
         st.markdown(f"**{i+1}. {fase}** *(Totale riga vincolato al {row_target:.2f}%)*")
         cols = st.columns(len(RUOLI))
+        
         for j, ruolo in enumerate(RUOLI):
-            # Inizializza la chiave in session_state se non presente
-            key = f"slider_{i}_{j}"
-            if key not in st.session_state:
-                st.session_state[key] = float(st.session_state.matrix_pct[i][j])
+            with cols[j]:
+                lock_key = f"lock_{i}_{j}"
+                slider_key = f"slider_{i}_{j}"
                 
-            cols[j].slider(
-                label=f"{ruolo}",
-                min_value=0.0,
-                max_value=float(row_target),
-                value=float(st.session_state.matrix_pct[i][j]),
-                step=0.25,
-                key=key,
-                on_change=rebalance_row,
-                args=(i, j)
-            )
+                # Checkbox di blocco
+                is_locked = st.checkbox(
+                    "🔒 Blocca",
+                    value=st.session_state.locked_cells[i][j],
+                    key=lock_key,
+                    help=f"Blocca {ruolo} per la fase {fase}"
+                )
+                st.session_state.locked_cells[i][j] = is_locked
+                
+                # Sincronizzazione session_state per lo slider
+                if slider_key not in st.session_state:
+                    st.session_state[slider_key] = float(st.session_state.matrix_pct[i][j])
+                
+                st.slider(
+                    label=f"**{ruolo}**",
+                    min_value=0.0,
+                    max_value=float(row_target),
+                    value=float(st.session_state.matrix_pct[i][j]),
+                    step=0.25,
+                    key=slider_key,
+                    disabled=is_locked,
+                    on_change=rebalance_row,
+                    args=(i, j)
+                )
 
 df_pct = pd.DataFrame(st.session_state.matrix_pct, index=FASI, columns=RUOLI)
 totale_pct = df_pct.values.sum()
 
 if np.isclose(totale_pct, 100.0, atol=0.01):
-    st.success(f" Somma totale percentuali: **{totale_pct:.2f}%** (Perfettamente quadratata)")
+    st.success(f" Somma totale percentuali: **{totale_pct:.2f}%** (Perfettamente bilanciata)")
 else:
     st.warning(f"⚠️ Somma totale percentuali: **{totale_pct:.2f}%**")
 
