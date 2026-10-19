@@ -10,7 +10,7 @@ st.set_page_config(
 )
 
 st.title("💶 Calcolo e Ripartizione Premio Produttività (Incentivi Tecnici)")
-st.caption("Distribuzione del fondo incentivi con blocco celle e auto-bilanciamento per riga")
+st.caption("Distribuzione del fondo incentivi ex art. 45 D.Lgs. 36/2023 con input da tastiera, slider e blocco celle")
 
 # --- DEFINIZIONE STRUTTURA ---
 RUOLI = [
@@ -47,30 +47,32 @@ if "matrix_pct" not in st.session_state:
     st.session_state.matrix_pct = [row.copy() for row in DEFAULT_PCT]
 
 if "locked_cells" not in st.session_state:
-    # Matrice booleana di celle bloccate (False = sbloccata)
     st.session_state.locked_cells = [[False for _ in RUOLI] for _ in FASI]
 
-# --- CALLBACK PER AUTO-BILANCIAMENTO CON BLOCCO ---
-def rebalance_row(row_idx, changed_col_idx):
+# --- LOGICA DI RI-BILANCIAMENTO RIGA ---
+def apply_rebalance(row_idx, changed_col_idx, new_val, source):
     """
     Ribilancia il delta solo tra le celle non bloccate della stessa riga.
+    Supporta l'aggiornamento sia da slider che da input numerico editabile.
     """
-    slider_key = f"slider_{row_idx}_{changed_col_idx}"
-    new_val = st.session_state[slider_key]
     old_row = st.session_state.matrix_pct[row_idx]
     target_row_sum = sum(DEFAULT_PCT[row_idx])
     
-    # Identifica le colonne modificabili (esclusa quella corrente e quelle bloccate)
     unlocked_cols = [
         c for c in range(len(RUOLI)) 
         if c != changed_col_idx and not st.session_state.locked_cells[row_idx][c]
     ]
     
-    # Se non ci sono altre colonne sbloccate su cui distribuire, annulla il movimento
+    # Se tutte le altre celle sono bloccate, ripristina il valore precedente
     if not unlocked_cols:
-        st.session_state[slider_key] = old_row[changed_col_idx]
-        st.toast(f"Tutte le altre celle della riga sono bloccate! Sblocca almeno un'altra cella.", icon="🔒")
+        st.session_state[f"slider_{row_idx}_{changed_col_idx}"] = float(old_row[changed_col_idx])
+        st.session_state[f"num_{row_idx}_{changed_col_idx}"] = float(old_row[changed_col_idx])
+        st.toast("Tutte le altre celle della riga sono bloccate! Sblocca almeno un'altra cella.", icon="🔒")
         return
+
+    # Limita l'input al massimo della riga
+    if new_val > target_row_sum:
+        new_val = target_row_sum
 
     delta = new_val - old_row[changed_col_idx]
     new_row = list(old_row)
@@ -79,7 +81,6 @@ def rebalance_row(row_idx, changed_col_idx):
     remaining_delta = delta
     available_indices = list(unlocked_cols)
     
-    # Algoritmo di distribuzione del delta residuo
     while abs(remaining_delta) > 1e-6 and available_indices:
         split = remaining_delta / len(available_indices)
         next_available = []
@@ -99,14 +100,23 @@ def rebalance_row(row_idx, changed_col_idx):
             break
         available_indices = next_available
 
-    # Se non è stato possibile assorbire l'intero delta (es. limiti raggiunti a 0%)
     if abs(remaining_delta) > 1e-4:
         new_row[changed_col_idx] -= remaining_delta
 
-    # Aggiorna session_state
+    # Aggiorna lo stato della matrice e sincronizza entrambi i widget (slider e number_input)
     for c in range(len(RUOLI)):
-        st.session_state.matrix_pct[row_idx][c] = round(new_row[c], 4)
-        st.session_state[f"slider_{row_idx}_{c}"] = round(new_row[c], 4)
+        val_rounded = round(new_row[c], 4)
+        st.session_state.matrix_pct[row_idx][c] = val_rounded
+        st.session_state[f"slider_{row_idx}_{c}"] = float(val_rounded)
+        st.session_state[f"num_{row_idx}_{c}"] = float(val_rounded)
+
+def on_slider_change(r, c):
+    val = st.session_state[f"slider_{r}_{c}"]
+    apply_rebalance(r, c, val, source="slider")
+
+def on_num_change(r, c):
+    val = st.session_state[f"num_{r}_{c}"]
+    apply_rebalance(r, c, val, source="num")
 
 # --- SIDEBAR: PARAMETRI GENERALI ---
 with st.sidebar:
@@ -120,12 +130,26 @@ with st.sidebar:
         format="%.2f"
     )
     
-    num_altri_collaboratori = st.number_input(
-        "N. dipendenti struttura (Altri Collaboratori)",
+    st.markdown("---")
+    st.subheader("👥 Numero Dipendenti Struttura")
+    
+    # Slider estesi fino a 100 dipendenti
+    num_collab_rup = st.slider(
+        "N. Collaboratori RUP / Resp. Fase",
         min_value=1,
+        max_value=100,
+        value=3,
+        step=1,
+        help="Dipendenti assegnati al supporto di RUP e Responsabili di Fase (Colonna 'Collaboratori')"
+    )
+    
+    num_altri_collab = st.slider(
+        "N. Collaboratori DEC / Altri",
+        min_value=1,
+        max_value=100,
         value=5,
         step=1,
-        help="Numero di persone tra cui suddividere equamente l'importo della colonna 'Altri Collaboratori'"
+        help="Dipendenti assegnati al supporto del DEC o alle funzioni trasversali (Colonna 'Altri Collaboratori')"
     )
     
     st.markdown("---")
@@ -140,7 +164,9 @@ with st.sidebar:
         st.session_state.locked_cells = [[False for _ in RUOLI] for _ in FASI]
         for r in range(len(FASI)):
             for c in range(len(RUOLI)):
-                st.session_state[f"slider_{r}_{c}"] = float(DEFAULT_PCT[r][c])
+                val = float(DEFAULT_PCT[r][c])
+                st.session_state[f"slider_{r}_{c}"] = val
+                st.session_state[f"num_{r}_{c}"] = val
                 st.session_state[f"lock_{r}_{c}"] = False
         st.rerun()
 
@@ -149,7 +175,7 @@ fondo_totale = valore_progetto * pct_fondo
 quota_distribuibile = fondo_totale * pct_personale
 quota_ente = fondo_totale * pct_innovazione
 
-# Metriche in evidenza
+# Metriche principali
 col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 col_m1.metric("Valore Progetto", f"€ {valore_progetto:,.2f}")
 col_m2.metric(f"Fondo Totale ({pct_fondo*100:.1f}%)", f"€ {fondo_totale:,.2f}")
@@ -158,10 +184,10 @@ col_m4.metric(f"Quota Fondo Ente ({pct_innovazione*100:.0f}%)", f"€ {quota_ent
 
 st.markdown("---")
 
-# --- REGOLAZIONE SLIDER CON BLOCCO ---
-st.subheader("🎛️ Regolazione Percentuali con Blocco Celle (🔒)")
-with st.expander("Apri per modificare e bloccare le percentuali", expanded=True):
-    st.caption("ℹ️ Spunta **🔒 Blocca** per fissare il valore di una cella: non verrà alterata se modifichi gli altri ruoli della riga.")
+# --- REGOLAZIONE PERCENTUALI (SLIDER + INPUT DIGITABILE + BLOCCO) ---
+st.subheader("🎛️ Regolazione Percentuali per Cella")
+with st.expander("Apri per modificare le quote percentuali (da tastiera o slider)", expanded=True):
+    st.caption("ℹ️ Puoi **digitare direttamente la percentuale** o trascinare lo slider. Spunta **🔒** per bloccare la cella durante il ricalcolo.")
     
     for i, fase in enumerate(FASI):
         row_target = sum(DEFAULT_PCT[i])
@@ -172,30 +198,52 @@ with st.expander("Apri per modificare e bloccare le percentuali", expanded=True)
             with cols[j]:
                 lock_key = f"lock_{i}_{j}"
                 slider_key = f"slider_{i}_{j}"
+                num_key = f"num_{i}_{j}"
                 
-                # Checkbox di blocco
+                curr_val = float(st.session_state.matrix_pct[i][j])
+                
+                # Checkbox per bloccare la cella
                 is_locked = st.checkbox(
-                    "🔒 Blocca",
+                    f"🔒 {ruolo}",
                     value=st.session_state.locked_cells[i][j],
                     key=lock_key,
                     help=f"Blocca {ruolo} per la fase {fase}"
                 )
                 st.session_state.locked_cells[i][j] = is_locked
                 
-                # Sincronizzazione session_state per lo slider
+                # Inizializza i valori di stato se non ancora presenti
                 if slider_key not in st.session_state:
-                    st.session_state[slider_key] = float(st.session_state.matrix_pct[i][j])
+                    st.session_state[slider_key] = curr_val
+                if num_key not in st.session_state:
+                    st.session_state[num_key] = curr_val
                 
+                # Campo di testo/numerico editabile da tastiera
+                st.number_input(
+                    label=f"Valore %",
+                    min_value=0.0,
+                    max_value=float(row_target),
+                    value=float(st.session_state.matrix_pct[i][j]),
+                    step=0.25,
+                    format="%.2f",
+                    key=num_key,
+                    disabled=is_locked,
+                    on_change=on_num_change,
+                    args=(i, j),
+                    label_visibility="collapsed"
+                )
+                
+                # Slider sincronizzato
                 st.slider(
-                    label=f"**{ruolo}**",
+                    label=f"Slider {ruolo}",
                     min_value=0.0,
                     max_value=float(row_target),
                     value=float(st.session_state.matrix_pct[i][j]),
                     step=0.25,
                     key=slider_key,
                     disabled=is_locked,
-                    on_change=rebalance_row,
-                    args=(i, j)
+                    on_change=on_slider_change,
+                    args=(i, j),
+                    label_visibility="collapsed"
                 )
 
 df_pct = pd.DataFrame(st.session_state.matrix_pct, index=FASI, columns=RUOLI)
@@ -222,31 +270,56 @@ df_formatted = df_euro_display.map(lambda x: f"€ {x:,.2f}")
 st.subheader("📊 Matrice Economica di Distribuzione (€)")
 st.dataframe(df_formatted, use_container_width=True)
 
-# --- FOCUS: ALTRI COLLABORATORI (TOTALE E PRO-CAPITE) ---
+# --- FOCUS DISTINTO SUI DUE GRUPPI DI COLLABORATORI ---
+totale_collab_rup = totali_ruolo["Collaboratori"]
+pro_capite_collab_rup = totale_collab_rup / num_collab_rup if num_collab_rup > 0 else 0.0
+
 totale_altri_collab = totali_ruolo["Altri Collaboratori"]
-quota_pro_capite = totale_altri_collab / num_altri_collaboratori if num_altri_collaboratori > 0 else 0.0
+pro_capite_altri_collab = totale_altri_collab / num_altri_collab if num_altri_collab > 0 else 0.0
 
-st.markdown("### 👥 Focus: Quota Pro-Capite 'Altri Collaboratori'")
-col_ac1, col_ac2, col_ac3 = st.columns(3)
-col_ac1.metric(
-    label="Fondo Totale 'Altri Collaboratori'",
-    value=f"€ {totale_altri_collab:,.2f}",
-    help="Somma complessiva assegnata alla colonna Altri Collaboratori"
-)
-col_ac2.metric(
-    label="Dipendenti Struttura Coinvolti",
-    value=f"{num_altri_collaboratori}"
-)
-col_ac3.metric(
-    label="Cifra Singolo Collaboratore",
-    value=f"€ {quota_pro_capite:,.2f}",
-    delta=f"{(quota_pro_capite / valore_progetto * 100):.4f}% sul progetto" if valore_progetto > 0 else None,
-    help="Importo spettante a ciascun collaboratore (Totale / Numero Dipendenti)"
+st.markdown("### 👥 Focus Pro-Capite: Ripartizione Collaboratori")
+
+tab1, tab2 = st.columns(2)
+
+with tab1:
+    st.info("#### 📂 Gruppo A: Collaboratori RUP / Resp. Fase")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Totale Spettante", f"€ {totale_collab_rup:,.2f}")
+    c2.metric("N. Dipendenti", f"{num_collab_rup}")
+    c3.metric(
+        "Quota Pro-Capite",
+        f"€ {pro_capite_collab_rup:,.2f}",
+        delta=f"{(pro_capite_collab_rup / valore_progetto * 100):.4f}% su gara" if valore_progetto > 0 else None
+    )
+    st.caption("Fondo derivante dalla colonna **Collaboratori** (supporto tecnico/progettuale e alle fasi di gara).")
+
+with tab2:
+    st.info("#### ⚙️ Gruppo B: Collaboratori DEC / Altri Collaboratori")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Totale Spettante", f"€ {totale_altri_collab:,.2f}")
+    c2.metric("N. Dipendenti", f"{num_altri_collab}")
+    c3.metric(
+        "Quota Pro-Capite",
+        f"€ {pro_capite_altri_collab:,.2f}",
+        delta=f"{(pro_capite_altri_collab / valore_progetto * 100):.4f}% su gara" if valore_progetto > 0 else None
+    )
+    st.caption("Fondo derivante dalla colonna **Altri Collaboratori** (supporto al DEC ed esecuzione/controlli).")
+
+# Riepilogo cumulativo collaboratori
+totale_collaboratori_complessivo = totale_collab_rup + totale_altri_collab
+dipendenti_totali = num_collab_rup + num_altri_collab
+media_ponderata = totale_collaboratori_complessivo / dipendenti_totali if dipendenti_totali > 0 else 0.0
+
+st.markdown(
+    f"""
+    > **Riepilogo Totale Struttura Collaboratori**: Destinati complessivamente **€ {totale_collaboratori_complessivo:,.2f}** 
+    su un totale di **{dipendenti_totali} dipendenti** (media complessiva di **€ {media_ponderata:,.2f}** a persona).
+    """
 )
 
-# --- QUADRO DI SINTESI PER RUOLO ---
+# --- QUADRO DI SINTESI GENERALE PER RUOLO ---
 st.markdown("---")
-st.subheader("📈 Sintesi Ripartizione per Ruolo")
+st.subheader("📈 Sintesi Generale per Ruolo")
 
 totali_per_ruolo_pct = df_pct.sum(axis=0)
 totali_per_ruolo_eur = df_euro.sum(axis=0)
